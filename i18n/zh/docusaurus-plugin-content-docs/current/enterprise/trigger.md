@@ -95,11 +95,18 @@ Annotations:
 ```sql
 CREATE TRIGGER IF NOT EXISTS load1_monitor
         ON (
-                SELECT collector AS label_collector,
-                host as label_host,
-                val
-                FROM host_load1 WHERE val > 10 and ts >= now() - '1 minutes'::INTERVAL
+                SELECT
+                        collector AS label_collector,
+                        host AS label_host,
+                        avg(val) AS avg_val,
+                        max(ts) AS ts
+                FROM host_load1
+                WHERE ts >= NOW() - '1 minutes'::INTERVAL
+                GROUP BY collector, host
+                HAVING avg(val) > 10
         ) EVERY '1 minute'::INTERVAL
+        FOR '3 minutes'::INTERVAL
+        KEEP_FIRING_FOR '3 minutes'::INTERVAL
         LABELS (severity=warning)
         ANNOTATIONS (comment='Your computer is smoking, should take a break.')
         NOTIFY(
@@ -107,11 +114,18 @@ CREATE TRIGGER IF NOT EXISTS load1_monitor
         );
 ```
 
-上述 SQL 将创建一个名为 `load1_monitor` 的触发器，每分钟运行一次。它会评估 `host_load1`
-表中最近 60 秒的数据；如果任何 load1 值超过 10，则 `NOTIFY` 子句中的 `WEBHOOK`
-选项会指定 Trigger 向在本地主机上运行且端口为 9093 的 Alertmanager 发送通知。
+上述 SQL 将创建一个名为 `load1_monitor` 的触发器，每分钟运行一次。它会评估过去
+1 分钟内各 collector–host 组合的平均负载；当平均值超过 10 时，`NOTIFY` 子句中的
+`WEBHOOK` 选项会指定 Trigger 向在本地主机上运行且端口为 9093 的 Alertmanager 发
+送通知。
 
-执行 `SHOW TRIGGERS` 查看已创建的触发器列表。
+`FOR '3 minutes'::INTERVAL` 表示只有当触发条件持续满足 3 分钟后，才会触发告警，
+其作用与 Prometheus Alert Rule 中的 `for` 选项类似。
+
+`KEEP_FIRING_FOR '3 minutes'::INTERVAL` 表示即使触发条件不再满足，告警仍会持续
+发送通知 3 分钟, 其作用与 Prometheus Alert Rule 中的 `keep_firing_for` 选项类似。
+
+查看已创建的 Trigger 列表。
 
 ```sql
 SHOW TRIGGERS;
@@ -127,20 +141,65 @@ SHOW TRIGGERS;
 +---------------+
 ```
 
-## 测试 Trigger
+查看 triggers 系统表获取更详细的信息。
 
-使用 [stress-ng](https://github.com/ColinIanKing/stress-ng) 模拟 60 秒的高 CPU 负载：
-
-```bash
-stress-ng --cpu 100 --cpu-load 10 --timeout 60
+```sql
+SELECT * FROM INFORMATION_SCHEMA.triggers\G
 ```
 
-load1 值将快速上升，Trigger 通知将被触发，在一分钟之内，指定的 Slack 频道将收到如下
-告警：
+输出结果应如下所示：
+
+```sql
+*************************** 1. row ***************************
+   trigger_name: load1_monitor
+     trigger_id: 1034
+        raw_sql: (SELECT collector AS label_collector, host AS label_host, avg(val) AS avg_val, max(ts) AS ts FROM host_load1 WHERE ts >= NOW() - '1 minutes'::INTERVAL GROUP BY collector, host HAVING avg(val) > 10)
+       interval: 60
+         labels: {"severity":"warning"}
+    annotations: {"comment":"Your computer is smoking, should take a break."}
+            for: 180
+keep_firing_for: 180
+       channels: [{"channel_type":{"Webhook":{"opts":{"timeout":"1m"},"url":"http://localhost:9093"}},"name":"alert_manager"}]
+    flownode_id: 11
+```
+
+查看 Trigger 完整的创建语句。
+
+```sql
+SHOW CREATE TRIGGER `load1_monitor`\G
+```
+
+输出结果应如下所示：
+
+```text
+*************************** 1. row ***************************
+       Trigger: load1_monitor
+Create Trigger: CREATE TRIGGER IF NOT EXISTS `load1_monitor`
+  ON (SELECT collector AS label_collector, host AS label_host, avg(val) AS avg_val, max(ts) AS ts FROM host_load1 WHERE ts >= NOW() - '1 minutes'::INTERVAL GROUP BY collector, host HAVING avg(val) > 10) EVERY '1 minute'::INTERVAL
+  FOR '3 minutes'::INTERVAL
+  KEEP_FIRING_FOR '3 minutes'::INTERVAL
+  LABELS (severity = 'warning')
+  ANNOTATIONS (comment = 'Your computer is smoking, should take a break.')
+  NOTIFY(
+    WEBHOOK `alert_manager` URL `http://localhost:9093` WITH (timeout = '1m'),
+  )
+```
+
+## 测试 Trigger
+
+使用 [stress-ng](https://github.com/ColinIanKing/stress-ng) 模拟 4min 的高 CPU
+负载：
+
+```bash
+stress-ng --cpu 100 --cpu-load 10 --timeout 240
+```
+
+load1 值将快速上升，Trigger 通知将被触发，在一分钟之内，指定的 Slack 频道将收到
+如下告警：
 
 ![Slack 告警示意图](/trigger-slack-alert.png)
 
 ## 参考资料
 
-- [Trigger 语法](/reference/sql/trigger-syntax.md): 与 `TRIGGER` 相关的 SQL 语句的语法细节。
-
+- [Trigger 语法](/reference/sql/trigger-syntax.md): 与 `TRIGGER` 相关的 SQL 语句
+的语法细节。

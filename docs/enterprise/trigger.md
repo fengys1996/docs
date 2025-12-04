@@ -9,8 +9,8 @@ Trigger allows you to define evaluation rules with SQL.
 GreptimeDB evaluates these rules periodically; once the condition is met, a
 notification is sent out.
 
-The following content is a quick start example that sets up a Trigger to monitor system load and raise alerts step by step.
-For details on how to write a Trigger,
+The following content is a quick start example that sets up a Trigger to monitor
+system load and raise alerts step by step. For details on how to write a Trigger,
 please refer to the [Syntax](/reference/sql/trigger-syntax.md) documentation.
 
 ## Quick Start Example
@@ -100,11 +100,18 @@ Connect to GreptimeDB with MySql client and run the following SQL:
 ```sql
 CREATE TRIGGER IF NOT EXISTS load1_monitor
         ON (
-                SELECT collector AS label_collector,
-                host as label_host, 
-                val
-                FROM host_load1 WHERE val > 10 and ts >= now() - '1 minutes'::INTERVAL
+                SELECT
+                        collector AS label_collector,
+                        host AS label_host,
+                        avg(val) AS avg_val,
+                        max(ts) AS ts
+                FROM host_load1
+                WHERE ts >= NOW() - '1 minutes'::INTERVAL
+                GROUP BY collector, host
+                HAVING avg(val) > 10;
         ) EVERY '1 minute'::INTERVAL
+        FOR '3 minutes'::INTERVAL
+        KEEP_FIRING_FOR '3 minutes'::INTERVAL
         LABELS (severity=warning)
         ANNOTATIONS (comment='Your computer is smoking, should take a break.')
         NOTIFY(
@@ -112,11 +119,20 @@ CREATE TRIGGER IF NOT EXISTS load1_monitor
         );
 ```
 
-The above SQL will create a trigger named `load1_monitor` that runs every minute.
-It evaluates the last 60 seconds of data in `host_load1`; if any load1 value
-exceeds 10, the `WEBHOOK` option in the `NOTIFY` syntax specifies that this
-trigger will send a notification to Alertmanager which running on localhost with
-port 9093.
+The above SQL creates a trigger named `load1_monitor` that runs every minute.
+It calculates the average load per collector and host over the previous minute;
+whenever an average exceeds 10, the `WEBHOOK` option in the `NOTIFY` clause
+delivers a notification to Alertmanager running on localhost port 9093.
+
+`FOR '3 minutes'::INTERVAL` works the same way as Prometheus alerting rules
+[`for` duration](https://prometheus.io/docs/prometheus/latest/configuration/alerting_rules/):
+the condition must remain true for three minutes before the trigger enters the
+firing state, which filters out transient spikes.
+
+`KEEP_FIRING_FOR '3 minutes'::INTERVAL` mirrors Alertmanager's
+[`keep_firing_for`](https://prometheus.io/docs/alerting/latest/configuration/):
+additional minutes so downstream routes—especially those with longer
+`group_interval` or `repeat_interval`—can still receive notifications.
 
 You can execute `SHOW TRIGGERS` to view the list of created Triggers.
 
@@ -151,4 +167,3 @@ minute Slack channel will receive an alert like:
 ## Reference
 
 - [Syntax](/reference/sql/trigger-syntax.md): The syntax for SQL statements related to `TRIGGER`.
-
